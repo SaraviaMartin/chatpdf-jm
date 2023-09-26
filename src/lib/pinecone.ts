@@ -1,7 +1,10 @@
-import {PineconeClient} from '@pinecone-database/pinecone'
+import {PineconeClient, Vector, utils as PineconeUtils} from '@pinecone-database/pinecone'
 import { downloadFromS3 } from './s3-server'
 import {PDFLoader} from 'langchain/document_loaders/fs/pdf'
+import md5 from 'md5'
 import {Document, RecursiveCharacterTextSplitter} from '@pinecone-database/doc-splitter'
+import { getEmbedding } from './embeddings'
+import { convertToAscii } from './utils'
 
 let pinecone: PineconeClient | null = null
 
@@ -35,7 +38,40 @@ export async function loadS3IntoPinecone(fileKey: string){
 
     //2. split and segment the pdf 
     const documents = await Promise.all(pages.map(prepareDocument))
+
+    //3. vectorise and embed  individual documents 
+    const vectors = await Promise.all(documents.flat().map(embedDocument))
+
+    //4.upload to pinecone
+    const client = await getPineconeClient()
+    const pineconeIndex = client.Index('chatpdf-jm')
+
+    console.log('inserting vectors into pinecone')
+    const namespace = convertToAscii(fileKey)
+    PineconeUtils.chunkedUpsert(pineconeIndex, vectors, namespace, 10)
+
+    return documents[0]
 }
+
+async function embedDocument(doc: Document) {
+    try {
+        const embeddings = await getEmbedding(doc.pageContent)
+        const hash = md5(doc.pageContent)
+
+        return {
+            id: hash,
+            values: embeddings,
+            metadata: {
+                text: doc.metadata.text,
+                pageNumber: doc.metadata.pageNumber
+            }
+        } as Vector
+    } catch (error) {
+        console.log('error embedding document', error)
+        throw error
+    }
+}
+
 
 export const truncateStringByBytes = (str: string, bytes:number) => {
     const enc = new TextEncoder()
